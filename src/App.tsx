@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+
+const COOKIES_GUIDE_URL =
+  "https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp";
 import "./App.css";
 
 type FormatId = "best" | "4k" | "1440" | "1080" | "720" | "audio";
@@ -42,13 +45,20 @@ type FetchResult =
   | ({ kind: "video" } & VideoMetadata)
   | ({ kind: "playlist" } & PlaylistMetadata);
 
+type JobKind = "download" | "transcribe";
+
 interface Job {
   id: string;
   url: string;
+  kind: JobKind;
   format: FormatId;
   outputDir: string;
   subs: boolean;
   thumbnail: boolean;
+  instagramSafe: boolean;
+  browserCookies: boolean;
+  browser: string;
+  cookiesFile: string | null;
   status: JobStatus;
   progress: number;
   log: string[];
@@ -74,7 +84,15 @@ const STORAGE = {
   format: "da-video-tool:format",
   subs: "da-video-tool:subs",
   thumb: "da-video-tool:thumb",
+  instagramSafe: "da-video-tool:instagramSafe",
+  browserCookies: "da-video-tool:browserCookies",
+  browser: "da-video-tool:browser",
+  cookiesFile: "da-video-tool:cookiesFile",
+  transcribe: "da-video-tool:transcribe",
+  keepVideo: "da-video-tool:keepVideo",
 };
+
+const BROWSERS = ["chrome", "firefox", "edge", "brave", "opera", "vivaldi"];
 
 function newId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -120,6 +138,39 @@ function looksLikeUrl(s: string): boolean {
   return /^https?:\/\/\S+\.\S+/i.test(s.trim());
 }
 
+function parseUrls(input: string): string[] {
+  const seen = new Set<string>();
+  return input
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!looksLikeUrl(item) || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+}
+
+function isInstagramUrl(input: string): boolean {
+  try {
+    const host = new URL(input.trim()).hostname.toLowerCase();
+    return host === "instagram.com" || host.endsWith(".instagram.com");
+  } catch {
+    return /instagram\.com/i.test(input);
+  }
+}
+
+function titleFromUrl(input: string): string {
+  try {
+    const parsed = new URL(input);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const reelIndex = parts.findIndex((part) => part === "reel" || part === "p" || part === "tv");
+    if (reelIndex >= 0 && parts[reelIndex + 1]) return `Instagram ${parts[reelIndex + 1]}`;
+    return parsed.hostname.replace(/^www\./, "");
+  } catch {
+    return "untitled";
+  }
+}
+
 function parseProgressLine(line: string): number | null {
   const m = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
   return m ? Math.min(100, parseFloat(m[1])) : null;
@@ -152,6 +203,10 @@ function loadBool(key: string, def: boolean): boolean {
   return v == null ? def : v === "1";
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 function Sparkle({ className = "" }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -173,6 +228,15 @@ export default function App() {
   );
   const [subs, setSubs] = useState<boolean>(() => loadBool(STORAGE.subs, false));
   const [embedThumb, setEmbedThumb] = useState<boolean>(() => loadBool(STORAGE.thumb, false));
+  const [instagramSafe, setInstagramSafe] = useState<boolean>(() => loadBool(STORAGE.instagramSafe, true));
+  const [browserCookies, setBrowserCookies] = useState<boolean>(() => loadBool(STORAGE.browserCookies, false));
+  const [browser, setBrowser] = useState<string>(() => localStorage.getItem(STORAGE.browser) || "firefox");
+  const [cookiesFile, setCookiesFile] = useState<string | null>(() => localStorage.getItem(STORAGE.cookiesFile) || null);
+  const [transcribe, setTranscribe] = useState<boolean>(() => loadBool(STORAGE.transcribe, false));
+  const [keepVideo, setKeepVideo] = useState<boolean>(() => loadBool(STORAGE.keepVideo, false));
+  const [groqKeySaved, setGroqKeySaved] = useState<boolean>(false);
+  const [groqKeyInput, setGroqKeyInput] = useState<string>("");
+  const [showSettings, setShowSettings] = useState<boolean>(false);
 
   const [fetchResult, setFetchResult] = useState<FetchResult | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
@@ -192,8 +256,36 @@ export default function App() {
   useEffect(() => { localStorage.setItem(STORAGE.format, format); }, [format]);
   useEffect(() => { localStorage.setItem(STORAGE.subs, subs ? "1" : "0"); }, [subs]);
   useEffect(() => { localStorage.setItem(STORAGE.thumb, embedThumb ? "1" : "0"); }, [embedThumb]);
+  useEffect(() => { localStorage.setItem(STORAGE.instagramSafe, instagramSafe ? "1" : "0"); }, [instagramSafe]);
+  useEffect(() => { localStorage.setItem(STORAGE.browserCookies, browserCookies ? "1" : "0"); }, [browserCookies]);
+  useEffect(() => { localStorage.setItem(STORAGE.browser, browser); }, [browser]);
+  useEffect(() => { localStorage.setItem(STORAGE.transcribe, transcribe ? "1" : "0"); }, [transcribe]);
+  useEffect(() => { localStorage.setItem(STORAGE.keepVideo, keepVideo ? "1" : "0"); }, [keepVideo]);
+  useEffect(() => {
+    if (cookiesFile) localStorage.setItem(STORAGE.cookiesFile, cookiesFile);
+    else localStorage.removeItem(STORAGE.cookiesFile);
+  }, [cookiesFile]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
+    invoke<boolean>("groq_key_status").then(setGroqKeySaved).catch(() => setGroqKeySaved(false));
+  }, []);
+
+  async function saveGroqKey() {
+    const key = groqKeyInput.trim();
+    if (!key) return;
+    try {
+      await invoke("set_groq_key", { key });
+      setGroqKeySaved(true);
+      setGroqKeyInput("");
+    } catch (e) {
+      console.error("save groq key failed", e);
+    }
+  }
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
     const unP = listen<{ id: string; line: string }>("download-progress", (e) => {
       const { id, line } = e.payload;
       setJobs((prev) =>
@@ -230,7 +322,14 @@ export default function App() {
 
   useEffect(() => {
     setFetchError(null);
-    if (!looksLikeUrl(url)) {
+    const urls = parseUrls(url);
+    if (urls.length !== 1) {
+      setFetchResult(null);
+      setPlaylistSel(new Set());
+      setFetchLoading(false);
+      return;
+    }
+    if (!isTauriRuntime()) {
       setFetchResult(null);
       setPlaylistSel(new Set());
       setFetchLoading(false);
@@ -240,7 +339,12 @@ export default function App() {
     setFetchLoading(true);
     const t = setTimeout(async () => {
       try {
-        const data = await invoke<FetchResult>("fetch_metadata", { url: url.trim() });
+        const data = await invoke<FetchResult>("fetch_metadata", {
+          url: urls[0],
+          browserCookies,
+          browser,
+          cookiesFile,
+        });
         if (myReq !== metadataReqId.current) return;
         setFetchResult(data);
         setFetchError(null);
@@ -259,7 +363,7 @@ export default function App() {
       }
     }, 600);
     return () => clearTimeout(t);
-  }, [url]);
+  }, [url, browserCookies, browser, cookiesFile]);
 
   async function pickFolder() {
     const picked = await open({
@@ -271,6 +375,16 @@ export default function App() {
     if (typeof picked === "string") setOutputDir(picked);
   }
 
+  async function pickCookiesFile() {
+    const picked = await open({
+      directory: false,
+      multiple: false,
+      title: "Pick your cookies.txt file",
+      filters: [{ name: "Cookies", extensions: ["txt"] }],
+    });
+    if (typeof picked === "string") setCookiesFile(picked);
+  }
+
   async function pasteFromClipboard() {
     try {
       const text = await navigator.clipboard.readText();
@@ -278,14 +392,19 @@ export default function App() {
     } catch (e) { console.error("clipboard read failed", e); }
   }
 
-  function buildJob(opts: { url: string; title: string; thumb: string | null; channel: string | null }): Job {
+  function buildJob(opts: { url: string; title: string; thumb: string | null; channel: string | null; kind?: JobKind }): Job {
     return {
       id: newId(),
       url: opts.url,
+      kind: opts.kind || "download",
       format,
       outputDir,
       subs,
       thumbnail: embedThumb,
+      instagramSafe: instagramSafe || isInstagramUrl(opts.url),
+      browserCookies,
+      browser,
+      cookiesFile,
       status: "queued",
       progress: 0,
       log: [],
@@ -297,17 +416,42 @@ export default function App() {
     };
   }
 
+  // Turn one target into the right job(s): transcribe, download, or both.
+  function jobsForTarget(opts: { url: string; title: string; thumb: string | null; channel: string | null }): Job[] {
+    if (transcribe) {
+      const out = [buildJob({ ...opts, kind: "transcribe" })];
+      if (keepVideo) out.push(buildJob({ ...opts, kind: "download" }));
+      return out;
+    }
+    return [buildJob({ ...opts, kind: "download" })];
+  }
+
   async function runJob(job: Job) {
     setJobs((prev) => prev.map((j) => (j.id === job.id ? { ...j, status: "running" } : j)));
     try {
-      await invoke("download_video", {
-        id: job.id,
-        url: job.url,
-        format: job.format,
-        outputDir: job.outputDir,
-        subs: job.subs,
-        thumbnail: job.thumbnail,
-      });
+      if (job.kind === "transcribe") {
+        await invoke("transcribe", {
+          id: job.id,
+          url: job.url,
+          outputDir: job.outputDir,
+          browserCookies: job.browserCookies,
+          browser: job.browser,
+          cookiesFile: job.cookiesFile,
+        });
+      } else {
+        await invoke("download_video", {
+          id: job.id,
+          url: job.url,
+          format: job.format,
+          outputDir: job.outputDir,
+          subs: job.subs,
+          thumbnail: job.thumbnail,
+          instagramSafe: job.instagramSafe,
+          browserCookies: job.browserCookies,
+          browser: job.browser,
+          cookiesFile: job.cookiesFile,
+        });
+      }
     } catch (err) {
       setJobs((prev) =>
         prev.map((j) => (j.id === job.id ? { ...j, status: "error", message: String(err) } : j))
@@ -333,20 +477,44 @@ export default function App() {
   }
 
   async function startSingleDownload() {
-    if (!url.trim() || !outputDir) return;
+    const urls = parseUrls(url);
+    if (urls.length !== 1 || !outputDir) return;
     if (fetchResult?.kind === "playlist") return;
     const meta = fetchResult?.kind === "video" ? fetchResult : null;
-    const job = buildJob({
-      url: url.trim(),
-      title: meta?.title || "untitled",
+    const targetUrl = urls[0];
+    const newJobs = jobsForTarget({
+      url: targetUrl,
+      title: meta?.title || titleFromUrl(targetUrl),
       thumb: meta?.thumbnail || null,
-      channel: meta?.channel || meta?.uploader || null,
+      channel: meta?.channel || meta?.uploader || (isInstagramUrl(targetUrl) ? "Instagram" : null),
     });
-    setJobs((prev) => [job, ...prev]);
+    setJobs((prev) => [...newJobs, ...prev]);
     setUrl("");
     setFetchResult(null);
     setPlaylistSel(new Set());
-    void processQueue([job]);
+    void processQueue(newJobs);
+  }
+
+  async function startUrlListDownload() {
+    const urls = parseUrls(url);
+    if (urls.length === 0 || !outputDir) return;
+    if (urls.length === 1 && fetchResult?.kind !== "playlist") {
+      await startSingleDownload();
+      return;
+    }
+    const newJobs = urls.flatMap((u) =>
+      jobsForTarget({
+        url: u,
+        title: titleFromUrl(u),
+        thumb: null,
+        channel: isInstagramUrl(u) ? "Instagram" : null,
+      })
+    );
+    setJobs((prev) => [...newJobs, ...prev]);
+    setUrl("");
+    setFetchResult(null);
+    setPlaylistSel(new Set());
+    void processQueue(newJobs);
   }
 
   async function startPlaylistDownload() {
@@ -355,11 +523,11 @@ export default function App() {
       .map((e, i) => ({ e, i }))
       .filter(({ i }) => playlistSel.has(i));
     if (picked.length === 0) return;
-    const newJobs: Job[] = picked.map(({ e }) => {
+    const newJobs: Job[] = picked.flatMap(({ e }) => {
       const u = e.url && /^https?:\/\//i.test(e.url)
         ? e.url
         : (e.id ? `https://www.youtube.com/watch?v=${e.id}` : (e.url || ""));
-      return buildJob({
+      return jobsForTarget({
         url: u,
         title: e.title,
         thumb: e.thumbnail,
@@ -380,12 +548,15 @@ export default function App() {
     try { await revealItemInDir(path); } catch (e) { console.error(e); }
   }
 
+  const urlList = parseUrls(url);
+  const hasInstagramUrls = urlList.some(isInstagramUrl);
   const canSubmitSingle =
-    fetchResult?.kind === "video" && url.trim().length > 0 && outputDir.length > 0;
+    fetchResult?.kind === "video" && urlList.length === 1 && outputDir.length > 0;
   const canSubmitPlaylist =
     fetchResult?.kind === "playlist" && playlistSel.size > 0 && outputDir.length > 0;
   const canSubmitNoMeta =
-    !fetchResult && !fetchLoading && url.trim().length > 0 && outputDir.length > 0;
+    !fetchResult && !fetchLoading && urlList.length > 0 && outputDir.length > 0;
+  const queuedCount = canSubmitPlaylist ? playlistSel.size : urlList.length;
 
   return (
     <main className="min-h-screen relative px-6 py-10 max-w-2xl mx-auto">
@@ -393,6 +564,61 @@ export default function App() {
       <Sparkle className="absolute top-12 right-8 w-5 h-5 text-da-green/40" />
       <Sparkle className="absolute top-32 left-6 w-3 h-3 text-da-purple/40" />
       <Sparkle className="absolute top-20 left-20 w-2 h-2 text-da-gold/40" />
+
+      {/* Settings toggle */}
+      <button
+        onClick={() => setShowSettings((s) => !s)}
+        className="absolute top-6 right-6 text-xs text-da-muted hover:text-da-green transition-colors flex items-center gap-1.5 z-10"
+        title="Settings"
+      >
+        <span className={`inline-block w-1.5 h-1.5 rounded-full ${groqKeySaved ? "bg-da-green" : "bg-da-muted/50"}`} />
+        settings
+      </button>
+
+      {showSettings && (
+        <div className="absolute top-14 right-6 w-80 bg-da-card border border-da-edge rounded-2xl p-4 shadow-[0_8px_40px_rgba(0,0,0,0.5)] z-20">
+          <div className="text-sm font-medium mb-1">Groq API key</div>
+          <div className="text-[11px] text-da-muted mb-3 leading-relaxed">
+            Needed for transcription. Free at{" "}
+            <button
+              type="button"
+              onClick={() => { void openUrl("https://console.groq.com/keys"); }}
+              className="text-da-blue hover:text-da-blue/80 underline underline-offset-2"
+            >
+              console.groq.com/keys
+            </button>
+            . Stored locally, never leaves your machine.
+          </div>
+          <input
+            type="password"
+            value={groqKeyInput}
+            onChange={(e) => setGroqKeyInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") saveGroqKey(); }}
+            placeholder={groqKeySaved ? "key saved — paste a new one to replace" : "gsk_..."}
+            className="w-full bg-da-bg/70 border border-da-edge rounded-xl px-3 py-2 text-sm placeholder:text-da-muted/60 focus:outline-none focus:border-da-green transition-colors"
+          />
+          <div className="mt-3 flex items-center justify-between">
+            <span className={`text-[11px] ${groqKeySaved ? "text-da-green" : "text-da-muted"}`}>
+              {groqKeySaved ? "✓ key saved" : "no key yet"}
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowSettings(false)}
+                className="text-[11px] px-3 py-1.5 rounded-full text-da-muted hover:text-da-text transition-colors"
+              >
+                close
+              </button>
+              <button
+                onClick={saveGroqKey}
+                disabled={!groqKeyInput.trim()}
+                className="text-[11px] px-3 py-1.5 rounded-full bg-da-green text-da-bg font-medium disabled:opacity-30 disabled:cursor-not-allowed hover:brightness-110 transition-all"
+              >
+                save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Header */}
       <header className="text-center mb-10 pt-4">
@@ -410,30 +636,35 @@ export default function App() {
       {/* Main card */}
       <section className="bg-da-card border border-da-edge rounded-[28px] p-6 shadow-[0_8px_40px_rgba(64,255,120,0.06)] mb-8">
         {/* URL input */}
-        <label className="block text-xs text-da-muted ml-2 mb-2">drop a link</label>
+        <label className="block text-xs text-da-muted ml-2 mb-2">drop links</label>
         <div className="relative">
-          <input
-            type="text"
+          <textarea
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
+              if (e.key !== "Enter" || !e.ctrlKey) return;
               if (canSubmitPlaylist) startPlaylistDownload();
-              else if (canSubmitSingle || canSubmitNoMeta) startSingleDownload();
+              else if (canSubmitSingle || canSubmitNoMeta) startUrlListDownload();
             }}
-            placeholder="paste any video URL..."
-            className="w-full bg-da-bg/70 border border-da-edge rounded-2xl px-5 py-4 pr-20 text-sm placeholder:text-da-muted/70 focus:outline-none focus:border-da-green focus:shadow-[0_0_0_4px_rgba(64,255,120,0.08)] transition-all"
+            placeholder="paste one video URL or a list of Instagram Reel URLs..."
+            rows={4}
+            className="w-full min-h-32 resize-y bg-da-bg/70 border border-da-edge rounded-2xl px-5 py-4 pr-20 text-sm placeholder:text-da-muted/70 focus:outline-none focus:border-da-green focus:shadow-[0_0_0_4px_rgba(64,255,120,0.08)] transition-all"
           />
           <button
             onClick={pasteFromClipboard}
-            className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 text-xs text-da-muted hover:text-da-green hover:bg-da-green/10 rounded-lg transition-colors"
+            className="absolute right-2 top-3 px-3 py-1.5 text-xs text-da-muted hover:text-da-green hover:bg-da-green/10 rounded-lg transition-colors"
           >
             paste
           </button>
         </div>
+        {urlList.length > 1 && (
+          <div className="mt-2 ml-2 text-xs text-da-muted">
+            {urlList.length} links ready {hasInstagramUrls && <span className="text-da-green">with Instagram safety on</span>}
+          </div>
+        )}
 
         {/* Preview / playlist picker */}
-        {(fetchLoading || fetchResult || fetchError) && looksLikeUrl(url) && (
+        {(fetchLoading || fetchResult || fetchError) && urlList.length === 1 && (
           <div className="mt-3 bg-da-bg/40 border border-da-edge/60 rounded-2xl overflow-hidden">
             {fetchLoading && !fetchResult && (
               <div className="p-4 flex items-center gap-3 text-da-muted text-sm">
@@ -442,8 +673,15 @@ export default function App() {
               </div>
             )}
             {!fetchLoading && fetchError && (
-              <div className="p-4 text-da-gold text-xs">
-                hmm, couldn't find it — double-check the link
+              <div className="p-4 text-da-gold text-xs space-y-1">
+                <div className="font-medium">couldn't read that link</div>
+                <div className="text-da-muted break-words leading-relaxed">{fetchError}</div>
+                {/instagram|login|cookie|empty media|rate.?limit/i.test(fetchError) && (
+                  <div className="text-da-blue/90 pt-1">
+                    Instagram needs your login — turn on <span className="text-da-blue">browser login</span> below
+                    (pick the browser you're logged into IG on) or load a <span className="text-da-blue">cookies.txt</span>.
+                  </div>
+                )}
               </div>
             )}
 
@@ -596,7 +834,106 @@ export default function App() {
           >
             cover image
           </button>
+          <button
+            onClick={() => setInstagramSafe(!instagramSafe)}
+            className={`text-xs px-4 py-2 rounded-full border transition-all ${
+              instagramSafe
+                ? "bg-da-green/15 border-da-green text-da-green"
+                : "bg-da-bg/40 border-da-edge text-da-muted hover:border-da-green/50 hover:text-da-green"
+            }`}
+          >
+            Instagram safe mode
+          </button>
+          <button
+            onClick={() => setBrowserCookies(!browserCookies)}
+            className={`text-xs px-4 py-2 rounded-full border transition-all ${
+              browserCookies
+                ? "bg-da-blue/15 border-da-blue text-da-blue"
+                : "bg-da-bg/40 border-da-edge text-da-muted hover:border-da-blue/50 hover:text-da-blue"
+            }`}
+            title="Use your logged-in browser session (needed for Instagram)"
+          >
+            browser login
+          </button>
+          {browserCookies && (
+            <select
+              value={browser}
+              onChange={(e) => setBrowser(e.target.value)}
+              className="text-xs px-3 py-2 rounded-full border border-da-blue/60 bg-da-bg/40 text-da-blue focus:outline-none focus:border-da-blue cursor-pointer"
+              title="Pick the browser you're logged into Instagram on"
+            >
+              {BROWSERS.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
+          )}
+          <button
+            onClick={cookiesFile ? () => setCookiesFile(null) : pickCookiesFile}
+            className={`text-xs px-4 py-2 rounded-full border transition-all ${
+              cookiesFile
+                ? "bg-da-green/15 border-da-green text-da-green"
+                : "bg-da-bg/40 border-da-edge text-da-muted hover:border-da-green/50 hover:text-da-green"
+            }`}
+            title={cookiesFile || "Load a cookies.txt file — the most reliable way past logins"}
+          >
+            {cookiesFile ? `cookies.txt ✓ (clear)` : "cookies.txt"}
+          </button>
+          <span className="w-px h-6 bg-da-edge/60 self-center mx-1" />
+          <button
+            onClick={() => setTranscribe(!transcribe)}
+            className={`text-xs px-4 py-2 rounded-full border transition-all ${
+              transcribe
+                ? "bg-da-purple/15 border-da-purple text-da-purple"
+                : "bg-da-bg/40 border-da-edge text-da-muted hover:border-da-purple/50 hover:text-da-purple"
+            }`}
+            title="Transcribe the audio to text with Groq"
+          >
+            transcribe
+          </button>
+          {transcribe && (
+            <button
+              onClick={() => setKeepVideo(!keepVideo)}
+              className={`text-xs px-4 py-2 rounded-full border transition-all ${
+                keepVideo
+                  ? "bg-da-green/15 border-da-green text-da-green"
+                  : "bg-da-bg/40 border-da-edge text-da-muted hover:border-da-green/50 hover:text-da-green"
+              }`}
+              title="Also keep the video file, not just the transcript"
+            >
+              keep video too
+            </button>
+          )}
         </div>
+        {transcribe && !groqKeySaved && (
+          <p className="mt-2 ml-2 text-[10px] text-da-gold leading-relaxed">
+            transcribe needs a Groq API key —{" "}
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="text-da-gold underline underline-offset-2 hover:brightness-125"
+            >
+              add it in settings
+            </button>{" "}
+            (free at console.groq.com)
+          </p>
+        )}
+        {(browserCookies || cookiesFile) && (
+          <p className="mt-2 ml-2 text-[10px] text-da-muted/70 leading-relaxed">
+            {cookiesFile
+              ? "using your cookies.txt — most reliable for Instagram"
+              : `pulling login from ${browser} — close ${browser} first if it errors, or use a cookies.txt`}
+          </p>
+        )}
+        <p className="mt-2 ml-2 text-[10px] text-da-muted/60 leading-relaxed">
+          Instagram &amp; other logins need your cookies.{" "}
+          <button
+            type="button"
+            onClick={() => { void openUrl(COOKIES_GUIDE_URL); }}
+            className="text-da-blue/80 hover:text-da-blue underline underline-offset-2 transition-colors"
+          >
+            how do I get a cookies.txt?
+          </button>
+        </p>
 
         {/* Primary button */}
         {(() => {
@@ -605,7 +942,7 @@ export default function App() {
             <button
               onClick={() => {
                 if (canSubmitPlaylist) startPlaylistDownload();
-                else startSingleDownload();
+                else startUrlListDownload();
               }}
               disabled={!isReady}
               className={`mt-6 w-full font-semibold py-4 rounded-2xl text-base transition-all ${
@@ -614,13 +951,16 @@ export default function App() {
                   : "bg-da-edge/40 text-da-muted cursor-not-allowed border border-da-edge"
               }`}
             >
-              {!outputDir
-                ? "pick a folder to save to"
-                : canSubmitPlaylist
-                ? `get ${playlistSel.size} ${playlistSel.size === 1 ? "video" : "videos"}`
-                : canSubmitSingle || canSubmitNoMeta
-                ? "get it"
-                : "paste a link to start"}
+              {(() => {
+                const noun = transcribe ? (keepVideo ? "video + transcript" : "transcript") : "video";
+                const nounPl = transcribe ? (keepVideo ? "videos + transcripts" : "transcripts") : "videos";
+                if (!outputDir) return "pick a folder to save to";
+                if (canSubmitPlaylist)
+                  return `get ${playlistSel.size} ${playlistSel.size === 1 ? noun : nounPl}`;
+                if (canSubmitSingle || canSubmitNoMeta)
+                  return queuedCount > 1 ? `get ${queuedCount} ${nounPl}` : transcribe ? `get ${noun}` : "get it";
+                return "paste a link to start";
+              })()}
             </button>
           );
         })()}
@@ -673,6 +1013,11 @@ export default function App() {
                           <span className={`text-[11px] ${statusColor(job.status)}`}>
                             {statusText(job.status)}
                           </span>
+                          {job.kind === "transcribe" && (
+                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-da-purple/15 text-da-purple">
+                              transcript
+                            </span>
+                          )}
                           {isRunning && (
                             <span className="inline-block w-1.5 h-1.5 rounded-full bg-da-blue animate-pulse" />
                           )}
