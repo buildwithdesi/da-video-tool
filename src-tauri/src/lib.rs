@@ -338,7 +338,7 @@ async fn download_video(
         "4k" => {
             args.extend([
                 "-f".into(),
-                "bv*[height<=2160]+ba/b[height<=2160]".into(),
+                "bv*[height<=2160]+ba/b[height<=2160]/b".into(),
                 "--merge-output-format".into(),
                 "mp4".into(),
                 "--postprocessor-args".into(),
@@ -348,7 +348,7 @@ async fn download_video(
         "1440" => {
             args.extend([
                 "-f".into(),
-                "bv*[height<=1440]+ba/b[height<=1440]".into(),
+                "bv*[height<=1440]+ba/b[height<=1440]/b".into(),
                 "--merge-output-format".into(),
                 "mp4".into(),
                 "--postprocessor-args".into(),
@@ -358,7 +358,7 @@ async fn download_video(
         "1080" => {
             args.extend([
                 "-f".into(),
-                "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]".into(),
+                "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b".into(),
                 "--merge-output-format".into(),
                 "mp4".into(),
                 "--postprocessor-args".into(),
@@ -368,7 +368,7 @@ async fn download_video(
         "720" => {
             args.extend([
                 "-f".into(),
-                "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]".into(),
+                "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/b".into(),
                 "--merge-output-format".into(),
                 "mp4".into(),
                 "--postprocessor-args".into(),
