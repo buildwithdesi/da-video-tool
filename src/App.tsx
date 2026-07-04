@@ -159,6 +159,22 @@ function isInstagramUrl(input: string): boolean {
   }
 }
 
+// An IG profile or its /reels/ page (e.g. instagram.com/USER or instagram.com/USER/reels/),
+// as opposed to a single reel (instagram.com/reel/CODE).
+function isInstagramProfile(input: string): boolean {
+  try {
+    const u = new URL(input.trim());
+    const host = u.hostname.toLowerCase();
+    if (host !== "instagram.com" && !host.endsWith(".instagram.com")) return false;
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length === 0) return false;
+    const reserved = ["reel", "reels", "p", "tv", "stories", "explore", "accounts", "direct", "about"];
+    return !reserved.includes(parts[0].toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function titleFromUrl(input: string): string {
   try {
     const parsed = new URL(input);
@@ -339,7 +355,8 @@ export default function App() {
     setFetchLoading(true);
     const t = setTimeout(async () => {
       try {
-        const data = await invoke<FetchResult>("fetch_metadata", {
+        const cmd = isInstagramProfile(urls[0]) ? "enumerate_profile" : "fetch_metadata";
+        const data = await invoke<FetchResult>(cmd, {
           url: urls[0],
           browserCookies,
           browser,
@@ -646,7 +663,7 @@ export default function App() {
               if (canSubmitPlaylist) startPlaylistDownload();
               else if (canSubmitSingle || canSubmitNoMeta) startUrlListDownload();
             }}
-            placeholder="paste one video URL or a list of Instagram Reel URLs..."
+            placeholder="paste a video URL, a list of URLs, or a whole IG profile (instagram.com/username/reels) to grab all their reels..."
             rows={4}
             className="w-full min-h-32 resize-y bg-da-bg/70 border border-da-edge rounded-2xl px-5 py-4 pr-20 text-sm placeholder:text-da-muted/70 focus:outline-none focus:border-da-green focus:shadow-[0_0_0_4px_rgba(64,255,120,0.08)] transition-all"
           />
@@ -669,7 +686,7 @@ export default function App() {
             {fetchLoading && !fetchResult && (
               <div className="p-4 flex items-center gap-3 text-da-muted text-sm">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-da-blue animate-pulse" />
-                looking it up...
+                {isInstagramProfile(urlList[0] || "") ? "pulling every reel off the profile — hang tight…" : "looking it up..."}
               </div>
             )}
             {!fetchLoading && fetchError && (

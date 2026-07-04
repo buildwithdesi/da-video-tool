@@ -42,6 +42,10 @@ fn ffmpeg_path() -> PathBuf {
     binary_path("ffmpeg")
 }
 
+fn gallery_dl_path() -> PathBuf {
+    binary_path("gallery-dl")
+}
+
 #[derive(serde::Serialize, Clone)]
 struct ProgressEvent {
     id: String,
@@ -466,6 +470,140 @@ async fn download_video(
 }
 
 // ---------------------------------------------------------------------------
+// Instagram profile enumeration (gallery-dl)
+// yt-dlp's instagram:user extractor is broken, so we shell out to gallery-dl
+// to list every reel URL on a profile, then hand them to the existing playlist
+// checklist. Public profiles need no login; private ones use the same cookies.
+// ---------------------------------------------------------------------------
+
+/// Run gallery-dl, trying a bundled/PATH binary first, then `python -m gallery_dl`
+/// (PyInstaller one-file exes get quarantined by Defender, so we don't bundle it —
+/// this resolves whatever the user actually has installed).
+async fn run_gallery_dl(args: &[String]) -> Result<std::process::Output, String> {
+    let candidates: Vec<(PathBuf, Vec<String>)> = vec![
+        (gallery_dl_path(), vec![]),
+        (PathBuf::from("python"), vec!["-m".into(), "gallery_dl".into()]),
+        (PathBuf::from("py"), vec!["-m".into(), "gallery_dl".into()]),
+    ];
+    let mut last_err = String::new();
+    for (prog, lead) in candidates {
+        let mut full = lead.clone();
+        full.extend_from_slice(args);
+        match hidden_command(&prog)
+            .args(&full)
+            .stderr(Stdio::piped())
+            .output()
+            .await
+        {
+            Ok(out) => return Ok(out),
+            Err(e) => last_err = format!("{} ({})", prog.display(), e),
+        }
+    }
+    Err(format!(
+        "gallery-dl not found — install it with `pip install gallery-dl`. [{}]",
+        last_err
+    ))
+}
+
+/// Pull normalized reel/post page URLs out of gallery-dl's `-g` output.
+/// Lines look like `ytdl:https://www.instagram.com/reel/CODE/1.mp4` (plus raw
+/// CDN lines we ignore). Dedupes and normalizes to the canonical page URL.
+fn extract_ig_post_urls(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim().trim_start_matches("ytdl:");
+        for marker in ["/reel/", "/p/", "/tv/"] {
+            if let Some(idx) = line.find(marker) {
+                // Require the host right before the marker to be instagram.com and NOT
+                // the CDN (scontent-*.cdninstagram.com also ends with "instagram.com").
+                let before = &line[..idx];
+                if !before.ends_with("instagram.com") || before.ends_with("cdninstagram.com") {
+                    continue;
+                }
+                let code: String = line[idx + marker.len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                if code.is_empty() {
+                    continue;
+                }
+                let kind = marker.trim_matches('/');
+                let url = format!("https://www.instagram.com/{}/{}/", kind, code);
+                if seen.insert(url.clone()) {
+                    out.push(url);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Best-effort username from an instagram profile URL for the checklist title.
+fn profile_username(url: &str) -> String {
+    url.split("instagram.com/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').find(|s| !s.is_empty()))
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "profile".into())
+}
+
+#[tauri::command]
+async fn enumerate_profile(
+    url: String,
+    browser_cookies: bool,
+    browser: String,
+    cookies_file: Option<String>,
+) -> Result<FetchResult, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Empty URL".into());
+    }
+
+    // `-g` prints URLs without downloading. gallery-dl shares yt-dlp's cookie flags.
+    let mut args: Vec<String> = vec!["-g".into()];
+    push_cookie_args(&mut args, browser_cookies, &browser, &cookies_file);
+    args.push(trimmed.to_string());
+
+    let out = run_gallery_dl(&args).await?;
+
+    if !out.status.success() {
+        return Err(extract_error(&out.stderr));
+    }
+
+    let urls = extract_ig_post_urls(&String::from_utf8_lossy(&out.stdout));
+    if urls.is_empty() {
+        return Err("No reels found — profile may be private (turn on browser login) or empty".into());
+    }
+
+    let username = profile_username(trimmed);
+    let entries: Vec<PlaylistEntry> = urls
+        .iter()
+        .map(|u| {
+            let code = u.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+            PlaylistEntry {
+                id: Some(code.clone()),
+                title: format!("{} · {}", username, code),
+                url: Some(u.clone()),
+                duration: None,
+                thumbnail: None,
+                uploader: Some(username.clone()),
+                channel: None,
+            }
+        })
+        .collect();
+
+    Ok(FetchResult::Playlist(PlaylistMetadata {
+        title: format!("@{} — {} reels", username, urls.len()),
+        entry_count: urls.len(),
+        entries,
+        uploader: Some(username),
+        webpage_url: Some(trimmed.to_string()),
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Transcription (Groq whisper-large-v3-turbo)
 // The API key lives native-side in the app config dir — the webview never
 // holds it. Audio is pulled with yt-dlp, uploaded to Groq, and a .txt/.srt
@@ -768,6 +906,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             download_video,
             fetch_metadata,
+            enumerate_profile,
             transcribe,
             set_groq_key,
             groq_key_status
