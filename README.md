@@ -28,7 +28,7 @@ If you're using **Claude Code, Cursor, Codex, Windsurf, Aider**, or any AI dev e
 Paste this prompt into your AI:
 
 ```
-Look at this repo: https://github.com/jackdog668/da-video-tool
+Look at this repo: https://github.com/buildwithdesi/da-video-tool
 
 Read the README, the LICENSE, the package.json, src/App.tsx,
 src-tauri/src/lib.rs, src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
@@ -41,7 +41,7 @@ Tell me:
    you'd expect for a video downloader)?
 3. What external binaries does it bundle and where do they come from?
 4. Walk me through downloading the latest release installer from
-   https://github.com/jackdog668/da-video-tool/releases/latest
+   https://github.com/buildwithdesi/da-video-tool/releases/latest
    and installing it on Windows. Include the SmartScreen step.
 ```
 
@@ -49,7 +49,7 @@ Don't trust — verify. Your AI is your security partner.
 
 ### The quick install path
 
-Grab the installer from [Releases](https://github.com/jackdog668/da-video-tool/releases/latest):
+Grab the installer from [Releases](https://github.com/buildwithdesi/da-video-tool/releases/latest):
 
 ```
 Video.Lab_0.1.0_x64-setup.exe   (~62MB)
@@ -73,7 +73,7 @@ You'll need:
 Then:
 
 ```bash
-git clone https://github.com/jackdog668/da-video-tool.git
+git clone https://github.com/buildwithdesi/da-video-tool.git
 cd da-video-tool
 
 # Pull yt-dlp and ffmpeg into src-tauri/binaries/

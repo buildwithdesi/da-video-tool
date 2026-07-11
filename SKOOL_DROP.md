@@ -47,7 +47,7 @@ This is the install path I actually want y'all to use, because it's the same mov
 2. Paste this prompt:
 
 ```
-Look at this repo: https://github.com/jackdog668/da-video-tool
+Look at this repo: https://github.com/buildwithdesi/da-video-tool
 
 Read the README, the LICENSE, the package.json, src/App.tsx,
 src-tauri/src/lib.rs, src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
@@ -60,7 +60,7 @@ Tell me:
    you'd expect for a video downloader)?
 3. What external binaries does it bundle and where do they come from?
 4. Walk me through downloading the latest release installer from
-   https://github.com/jackdog668/da-video-tool/releases/latest
+   https://github.com/buildwithdesi/da-video-tool/releases/latest
    and installing it on Windows. Include the SmartScreen step.
 ```
 
@@ -71,7 +71,7 @@ That's the whole methodology of vibe coding in 5 minutes — your AI is your sec
 
 ### Path A — Quick install
 
-1. Open the [Release page](https://github.com/jackdog668/da-video-tool/releases/tag/v0.1.0)
+1. Open the [Release page](https://github.com/buildwithdesi/da-video-tool/releases/tag/v0.1.0)
 2. Under **Assets**, click `Video.Lab_0.1.0_x64-setup.exe` to download (~62MB)
 3. Double-click the downloaded `.exe`
 4. If Windows says **"Microsoft Defender SmartScreen prevented an unrecognized app from starting"** → click **More info** → **Run anyway**
@@ -111,7 +111,7 @@ Hosted on **GitHub Releases** — Skool's free-tier file cap is ~30MB so we host
 **Direct download (paste this into the Skool post as the install button link):**
 
 ```
-https://github.com/jackdog668/da-video-tool/releases/download/v0.1.0/Video.Lab_0.1.0_x64-setup.exe
+https://github.com/buildwithdesi/da-video-tool/releases/download/v0.1.0/Video.Lab_0.1.0_x64-setup.exe
 ```
 
 > GitHub Releases renamed the file from `Video Lab_...` to `Video.Lab_...` on upload — the dot is correct. When members download it, they'll see `Video.Lab_0.1.0_x64-setup.exe` on disk.
@@ -119,7 +119,7 @@ https://github.com/jackdog668/da-video-tool/releases/download/v0.1.0/Video.Lab_0
 **Release page (paste in the body so members can see what's new):**
 
 ```
-https://github.com/jackdog668/da-video-tool/releases/tag/v0.1.0
+https://github.com/buildwithdesi/da-video-tool/releases/tag/v0.1.0
 ```
 
 ### Verify your download (optional, for the paranoid)
